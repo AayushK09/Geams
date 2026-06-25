@@ -1,0 +1,24 @@
+{
+  "name": "geams",
+  "version": "1.0.0",
+  "description": "Self-hosted Teams-like meeting platform with WebRTC",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w frontend\" \"npm run dev -w backend\"",
+    "build": "npm run build -w frontend && npm run build -w backend",
+    "start": "npm start -w backend",
+    "frontend": "npm run dev -w frontend",
+    "backend": "npm run dev -w backend",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: geams-frontend
+    ports:
+      - '3001:3000'
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3000
+      NEXT_PUBLIC_SOCKET_IO_URL: http://localhost:3000
+    depends_on:
+      - backend
+    networks:
+      - geams-network
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: geams-backend
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      BACKEND_PORT: 3000
+      BACKEND_HOST: 0.0.0.0
+      DATABASE_URL: sqlite:./data/meetings.db
+      MEDIASOUP_NUM_WORKERS: 2
+      MEDIASOUP_LISTEN_IP: 0.0.0.0
+      MEDIASOUP_ANNOUNCED_IP: backend
+      CORS_ORIGIN: '*'
+    volumes:
+      - ./data:/app/data
+    networks:
+      - geams-network
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3000/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  geams-network:
+    driver: bridge
+
+volumes:
+  data:
