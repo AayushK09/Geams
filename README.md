@@ -161,7 +161,6 @@ Access the application at:
 - 🎙️ **Microphone** - Mute/unmute
 - 📹 **Camera** - Turn on/off
 - 🖥️ **Screen Share** - Share your screen
-- ⏺️ **Record** - Record the meeting
 - 💬 **Chat** - Open chat panel
 - ☎️ **Leave** - Exit the meeting
 
@@ -228,8 +227,6 @@ geams/
 - `consume-response` - Consumer created
 - `new-producer` - New producer available
 - `chat-message` - Chat message received
-- `recording-started` - Recording started
-- `recording-stopped` - Recording stopped
 - `camera-toggled` - Camera toggled
 - `mic-toggled` - Microphone toggled
 - `screen-share-started` - Screen share started
@@ -258,10 +255,6 @@ MEDIASOUP_LOG_LEVEL=warn
 MEDIASOUP_LISTEN_IP=0.0.0.0
 MEDIASOUP_ANNOUNCED_IP=localhost
 
-# Recording
-RECORDING_DIR=./recordings
-FFMPEG_PATH=ffmpeg
-
 # Frontend
 NEXT_PUBLIC_API_URL=http://localhost:3000
 NEXT_PUBLIC_SOCKET_IO_URL=http://localhost:3000
@@ -285,7 +278,7 @@ NEXT_PUBLIC_SOCKET_IO_URL=http://localhost:3000
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y docker.io docker-compose nginx ffmpeg nodejs npm
+sudo apt-get install -y docker.io docker-compose nginx nodejs npm
 
 sudo systemctl start docker
 sudo systemctl enable docker
