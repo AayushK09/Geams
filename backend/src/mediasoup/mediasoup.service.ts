@@ -127,7 +127,11 @@ export class MediasoupService {
     return transport;
   }
 
-  async createProducer(transport: WebRtcTransport, kind: 'audio' | 'video', rtpParameters: any): Promise<Producer> {
+  async createProducer(
+    transport: WebRtcTransport,
+    kind: 'audio' | 'video',
+    rtpParameters: any
+  ): Promise<Producer> {
     const producer = await transport.produce({
       kind,
       rtpParameters,

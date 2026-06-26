@@ -244,10 +244,11 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       rtpParameters: any;
       roomId: string;
       participantId: string;
+      appData?: Record<string, any>;
     }
   ) {
     try {
-      const { transportId, kind, rtpParameters, roomId, participantId } = data;
+      const { transportId, kind, rtpParameters, roomId, participantId, appData } = data;
 
       const transport = this.mediasoupService.getTransport(transportId);
       if (!transport) {
@@ -269,6 +270,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         producerId,
         participantId,
         kind,
+        appData: appData || {},
       });
 
       this.logger.debug(`Producer ${producerId} created for ${kind} in ${roomId}`);

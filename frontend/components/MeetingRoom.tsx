@@ -45,7 +45,7 @@ export default function MeetingRoom({
   const consumerMapRef = useRef<Map<string, Consumer>>(new Map());
 
   const consumeProducer = useCallback(
-    async (producerId: string, participantId: string) => {
+    async (producerId: string, participantId: string, appData?: Record<string, any>) => {
       const socket = socketRef.current;
       const device = deviceRef.current;
       const recvTransport = recvTransportRef.current;
@@ -79,19 +79,43 @@ export default function MeetingRoom({
             socket.emit('resume-consumer', { consumerId });
           }
 
-          const stream = new MediaStream([consumer.track]);
+          const isScreenShare = appData?.source === 'screen';
+          const screenShareId = `${participantId}-screen`;
 
-          setParticipants((prev) =>
-            prev.map((p) => {
-              if (p.id !== participantId) return p;
-              const existing = p.stream;
+          if (isScreenShare) {
+            // Screen share: add as a separate tile
+            setParticipants((prev) => {
+              const existing = prev.find((p) => p.id === screenShareId);
+              const screenStream = new MediaStream([consumer.track]);
               if (existing) {
-                existing.addTrack(consumer.track);
-                return { ...p, stream: existing };
+                return prev.map((p) =>
+                  p.id === screenShareId ? { ...p, stream: screenStream } : p
+                );
               }
-              return { ...p, stream };
-            })
-          );
+              const owner = prev.find((p) => p.id === participantId);
+              return [
+                ...prev,
+                {
+                  id: screenShareId,
+                  username: `${owner?.username || 'Participant'} (Screen)`,
+                  stream: screenStream,
+                  isScreenShare: true,
+                },
+              ];
+            });
+          } else {
+            // Camera/audio: add to main participant stream
+            setParticipants((prev) =>
+              prev.map((p) => {
+                if (p.id !== participantId) return p;
+                const existing = p.stream;
+                const newStream = new MediaStream(
+                  existing ? [...existing.getTracks(), consumer.track] : [consumer.track]
+                );
+                return { ...p, stream: newStream };
+              })
+            );
+          }
         }
       );
     },
@@ -127,13 +151,14 @@ export default function MeetingRoom({
 
       socket.on(
         'join-room-response',
-        async (data: { participantId: string; participants: Array<{ id: string; username: string; producerIds?: string[] }> }) => {
+        async (data: {
+          participantId: string;
+          participants: Array<{ id: string; username: string; producerIds?: string[] }>;
+        }) => {
           myParticipantIdRef.current = data.participantId;
 
           // Add existing participants (no stream yet, will be populated by new-producer)
-          setParticipants(
-            data.participants.map((p) => ({ id: p.id, username: p.username }))
-          );
+          setParticipants(data.participants.map((p) => ({ id: p.id, username: p.username })));
 
           // 3. Get router RTP capabilities
           socket.emit('get-rtp-capabilities', { roomId });
@@ -197,22 +222,26 @@ export default function MeetingRoom({
             );
           });
 
-          sendTransport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
-            socket.emit(
-              'produce',
-              {
-                transportId: sendTransport.id,
-                kind,
-                rtpParameters,
-                roomId,
-                participantId: myParticipantIdRef.current,
-              },
-              (res: any) => {
-                if (res?.error) errback(res.error);
-                else callback({ id: res.producerId });
-              }
-            );
-          });
+          sendTransport.on(
+            'produce',
+            async ({ kind, rtpParameters, appData }, callback, errback) => {
+              socket.emit(
+                'produce',
+                {
+                  transportId: sendTransport.id,
+                  kind,
+                  rtpParameters,
+                  appData,
+                  roomId,
+                  participantId: myParticipantIdRef.current,
+                },
+                (res: any) => {
+                  if (res?.error) errback(res.error);
+                  else callback({ id: res.producerId });
+                }
+              );
+            }
+          );
 
           // Produce audio and video tracks
           const stream = localStreamRef.current;
@@ -225,11 +254,7 @@ export default function MeetingRoom({
             if (videoTrack && device.canProduce('video')) {
               videoProducerRef.current = await sendTransport.produce({
                 track: videoTrack,
-                encodings: [
-                  { maxBitrate: 100000 },
-                  { maxBitrate: 300000 },
-                  { maxBitrate: 900000 },
-                ],
+                encodings: [{ maxBitrate: 100000 }, { maxBitrate: 300000 }, { maxBitrate: 900000 }],
                 codecOptions: { videoGoogleStartBitrate: 1000 },
               });
             }
@@ -262,7 +287,17 @@ export default function MeetingRoom({
       // 7. When a new producer appears (someone else starts sending), consume it
       socket.on(
         'new-producer',
-        ({ producerId, participantId, kind }: { producerId: string; participantId: string; kind: string }) => {
+        ({
+          producerId,
+          participantId,
+          kind,
+          appData,
+        }: {
+          producerId: string;
+          participantId: string;
+          kind: string;
+          appData?: Record<string, any>;
+        }) => {
           // Don't consume our own producers
           if (participantId === myParticipantIdRef.current) return;
           // Ensure participant is in list
@@ -272,7 +307,7 @@ export default function MeetingRoom({
             }
             return prev;
           });
-          consumeProducer(producerId, participantId);
+          consumeProducer(producerId, participantId, appData);
         }
       );
 
@@ -285,7 +320,11 @@ export default function MeetingRoom({
 
       socket.on('participant-left', (data: { participantId: string } | string) => {
         const id = typeof data === 'string' ? data : data.participantId;
-        setParticipants((prev) => prev.filter((p) => p.id !== id));
+        setParticipants((prev) => prev.filter((p) => p.id !== id && p.id !== `${id}-screen`));
+      });
+
+      socket.on('screen-share-stopped', (data: { participantId: string }) => {
+        setParticipants((prev) => prev.filter((p) => p.id !== `${data.participantId}-screen`));
       });
 
       socket.on('chat-message', (message: any) => {
@@ -301,14 +340,16 @@ export default function MeetingRoom({
       sendTransportRef.current?.close();
       recvTransportRef.current?.close();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, username]);
 
   const toggleCamera = () => {
     const stream = localStreamRef.current;
     if (stream) {
       const enabled = !isCameraOn;
-      stream.getVideoTracks().forEach((track) => { track.enabled = enabled; });
+      stream.getVideoTracks().forEach((track) => {
+        track.enabled = enabled;
+      });
       if (videoProducerRef.current) {
         enabled ? videoProducerRef.current.resume() : videoProducerRef.current.pause();
       }
@@ -325,7 +366,9 @@ export default function MeetingRoom({
     const stream = localStreamRef.current;
     if (stream) {
       const enabled = !isMicOn;
-      stream.getAudioTracks().forEach((track) => { track.enabled = enabled; });
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = enabled;
+      });
       if (audioProducerRef.current) {
         enabled ? audioProducerRef.current.resume() : audioProducerRef.current.pause();
       }
@@ -419,9 +462,9 @@ export default function MeetingRoom({
       </div>
 
       {/* Main Content */}
-      <div className="flex flex-1 gap-0">
+      <div className="flex flex-1 gap-0 min-h-0 overflow-hidden">
         {/* Video Grid */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <VideoGrid
             participants={participants}
             localStream={localStream}
