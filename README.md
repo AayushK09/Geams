@@ -1,16 +1,53 @@
 # GEAMS - Self-Hosted WebRTC Meeting Platform
 
-A fully self-hosted Teams-like video meeting platform with WebRTC and Mediasoup. Zero third-party dependency.
+A fully self-hosted Teams-like video meeting platform built with peer-to-peer WebRTC. No third-party media services. Deployable on any platform including **Render, Railway, Fly.io, and VPS**.
 
 ## Features
 
-✅ **Multi-user Video Conferencing** - Support for multiple concurrent users in a meeting
-✅ **Audio/Video Controls** - Individual mic and camera muting
-✅ **Screen Sharing** - Share your screen with participants
-✅ **Real-time Chat** - Built-in chat system during meetings
-✅ **Fully Self-Hosted** - Complete control over your data and infrastructure
-✅ **No Vendor Lock-in** - Zero dependency on cloud services
-✅ **SFU Architecture** - Efficient Selective Forwarding Unit for scalability
+✅ **Multi-user Video Conferencing** - Multiple participants in a room  
+✅ **Audio/Video Controls** - Individual mic and camera muting  
+✅ **Screen Sharing** - Share your screen with all participants  
+✅ **Real-time Chat** - Built-in chat during meetings  
+✅ **Fully Self-Hosted** - Complete control over your data  
+✅ **No Vendor Lock-in** - Zero dependency on paid media services  
+✅ **Render/Cloud Ready** - Works on any platform that supports WebSocket  
+✅ **P2P Architecture** - Media flows directly between browsers (no server bandwidth cost)
+
+## Architecture
+
+```
+Browser A ──WebSocket signaling──► NestJS Backend (Render/VPS)
+    │                                       │
+    │◄──────── offer/answer/ICE ────────────┤
+    │                                       │
+    └──────── P2P video/audio ─────────────► Browser B
+```
+
+This platform uses **peer-to-peer WebRTC**:
+
+- The backend only relays signaling messages (offer, answer, ICE candidates) over WebSocket
+- Video and audio travel **directly between browsers** using STUN traversal
+- No server-side media processing = no UDP port requirements = deploys anywhere
+
+## Scalability
+
+| Participants | Architecture             | Server Load                                   |
+| ------------ | ------------------------ | --------------------------------------------- |
+| 2            | P2P direct               | Minimal (signaling only)                      |
+| 3–6          | P2P mesh                 | Low–medium (each peer connects to all others) |
+| 7–15         | P2P mesh (degraded)      | Medium (N² connections)                       |
+| 15+          | Needs SFU (e.g. LiveKit) | N/A                                           |
+
+**P2P mesh scaling:**  
+Each participant opens a direct connection to every other participant. With N users, each browser maintains N-1 connections and uploads its stream N-1 times. This works well for small groups (2–8 people) and requires **zero server bandwidth** for media.
+
+**To scale beyond 8–10 participants**, you can swap the signaling backend to use [LiveKit](https://livekit.io) (free cloud tier) or self-host it on a server that supports UDP (Fly.io, DigitalOcean, etc.).
+
+**Server requirements are minimal** — the backend only handles:
+
+- WebSocket connections (~10 KB/s per user)
+- REST API for room management
+- SQLite database reads/writes
 
 ## Tech Stack
 
@@ -19,15 +56,13 @@ A fully self-hosted Teams-like video meeting platform with WebRTC and Mediasoup.
 - **Next.js 14** - React framework
 - **TypeScript** - Type safety
 - **Tailwind CSS** - Styling
-- **Socket.IO Client** - Real-time communication
-- **mediasoup-client** - WebRTC media handling
-- **Zustand** - State management
+- **Socket.IO Client** - Real-time signaling
+- **Native WebRTC** - `RTCPeerConnection` (no extra library needed)
 
 ### Backend
 
 - **NestJS** - Node.js framework
-- **Socket.IO** - WebSocket signaling
-- **Mediasoup 3** - SFU media server
+- **Socket.IO** - WebSocket signaling relay
 - **TypeORM** - Database ORM
 - **SQLite** - Lightweight database
 
@@ -83,9 +118,8 @@ Edit `.env` with your configuration:
 ```env
 NODE_ENV=development
 BACKEND_PORT=3000
-BACKEND_HOST=localhost
+BACKEND_HOST=0.0.0.0
 DATABASE_URL=sqlite:./data/meetings.db
-MEDIASOUP_NUM_WORKERS=1
 NEXT_PUBLIC_API_URL=http://localhost:3000
 NEXT_PUBLIC_SOCKET_IO_URL=http://localhost:3000
 ```
@@ -171,9 +205,11 @@ geams/
 ├── frontend/                 # Next.js frontend
 │   ├── app/                 # Pages and layouts
 │   ├── components/          # React components
+│   │   ├── MeetingRoom.tsx  # Core P2P WebRTC logic
+│   │   ├── VideoGrid.tsx    # Video layout + screen share UI
+│   │   ├── MeetingControls.tsx
+│   │   └── ChatPanel.tsx
 │   ├── services/            # API services
-│   ├── store/              # Zustand stores
-│   ├── styles/             # CSS and Tailwind
 │   └── package.json
 ├── backend/                 # NestJS backend
 │   ├── src/
@@ -181,14 +217,12 @@ geams/
 │   │   ├── main.ts         # Entry point
 │   │   ├── database/       # Database entities
 │   │   ├── rooms/          # Room management
-│   │   ├── mediasoup/      # Mediasoup SFU
-│   │   ├── websocket/      # Socket.IO gateway
+│   │   ├── websocket/      # Socket.IO signaling gateway
 │   │   └── health/         # Health checks
 │   └── package.json
-├── docker-compose.yml      # Docker Compose configuration
-├── .env.example           # Environment variables template
-├── package.json           # Monorepo root
-└── README.md              # This file
+├── docker-compose.yml
+├── .env.example
+└── README.md
 ```
 
 ## API Endpoints
@@ -206,31 +240,28 @@ geams/
 
 - `join-room` - Join a meeting room
 - `leave-room` - Leave a room
-- `create-transport` - Create WebRTC transport
-- `connect-transport` - Connect transport
-- `produce` - Start producing media
-- `consume` - Start consuming media
-- `camera-toggle` - Toggle camera
-- `mic-toggle` - Toggle microphone
+- `webrtc-offer` - Send WebRTC offer to a peer
+- `webrtc-answer` - Send WebRTC answer to a peer
+- `webrtc-ice-candidate` - Relay ICE candidate to a peer
+- `camera-toggle` - Notify others of camera state
+- `mic-toggle` - Notify others of mic state
 - `send-message` - Send chat message
-- `screen-share-start` - Start screen sharing
-- `screen-share-stop` - Stop screen sharing
+- `screen-share-start` - Notify screen sharing started
+- `screen-share-stop` - Notify screen sharing stopped
 
 ### Server → Client
 
-- `join-room-response` - Confirm room join
-- `participant-joined` - Notify new participant
-- `participant-left` - Notify participant left
-- `transport-created` - Transport created
-- `transport-connected` - Transport connected
-- `produce-response` - Producer created
-- `consume-response` - Consumer created
-- `new-producer` - New producer available
-- `chat-message` - Chat message received
-- `camera-toggled` - Camera toggled
-- `mic-toggled` - Microphone toggled
-- `screen-share-started` - Screen share started
-- `screen-share-stopped` - Screen share stopped
+- `join-room-response` - Confirm join, list of existing participants
+- `participant-joined` - New participant arrived
+- `participant-left` - Participant left
+- `webrtc-offer` - Forwarded offer from peer
+- `webrtc-answer` - Forwarded answer from peer
+- `webrtc-ice-candidate` - Forwarded ICE candidate
+- `chat-message` - Incoming chat message
+- `camera-toggled` - Peer camera state changed
+- `mic-toggled` - Peer mic state changed
+- `screen-share-started` - Peer started sharing
+- `screen-share-stopped` - Peer stopped sharing
 
 ## Configuration
 
@@ -248,27 +279,37 @@ CORS_ORIGIN=*
 # Database
 DATABASE_URL=sqlite:./data/meetings.db
 
-# Mediasoup Workers
-MEDIASOUP_NUM_WORKERS=1
-MEDIASOUP_WORKER_LOG_LEVEL=warn
-MEDIASOUP_LOG_LEVEL=warn
-MEDIASOUP_LISTEN_IP=0.0.0.0
-MEDIASOUP_ANNOUNCED_IP=localhost
-
-# Frontend
+# Frontend URLs (set to your deployed backend URL in production)
 NEXT_PUBLIC_API_URL=http://localhost:3000
 NEXT_PUBLIC_SOCKET_IO_URL=http://localhost:3000
 ```
 
-## Performance Optimization
+> **For local network (e.g. mobile testing):** set both `NEXT_PUBLIC_*` URLs and `MEDIASOUP_ANNOUNCED_IP` to your machine's local IP (e.g. `192.168.1.6`).
 
-### For Better Performance:
+## Performance & Optimization
 
-1. **Limit Video Quality** - Start with 720p, adjust based on bandwidth
-2. **Pause Unused Consumers** - Pauses video from inactive speakers
-3. **Use Simulcast** - Enable for scalability (future)
-4. **Monitor CPU** - Watch CPU usage with multiple meetings
-5. **Scale Horizontally** - Add more VPS instances with load balancer
+### P2P Mesh — What to Expect
+
+- **2–4 users:** Excellent quality, minimal CPU and bandwidth
+- **5–8 users:** Good quality; each user uploads their stream to N-1 peers
+- **9–15 users:** Usable but bandwidth-heavy on upload; recommend limiting video resolution
+- **15+ users:** Consider upgrading to an SFU (see below)
+
+### Tips
+
+1. **Limit video resolution** — 720p for small groups, 480p for larger ones
+2. **Use headphones** — Reduces echo and improves audio quality
+3. **Stable network** — P2P is sensitive to packet loss; a wired connection is ideal
+4. **TURN server** — Users behind strict corporate NAT may fail to connect without one. Add a free TURN server (e.g. [Metered.ca](https://www.metered.ca/tools/openrelay/)) to `ICE_SERVERS` in `MeetingRoom.tsx`
+
+### Upgrading to SFU (for 15+ users)
+
+For large meetings, replace the P2P layer with [LiveKit](https://livekit.io):
+
+- Free cloud tier available
+- Drop-in NestJS + React SDKs
+- Handles 100+ participants per room
+- Still fully self-hostable on any server with UDP support
 
 ## Production Deployment
 

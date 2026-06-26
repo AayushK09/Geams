@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RoomsModule } from './rooms/rooms.module';
-import { MediasoupModule } from './mediasoup/mediasoup.module';
 import { SignalingGateway } from './websocket/signaling.gateway';
 import { DatabaseModule } from './database/database.module';
 import { HealthController } from './health/health.controller';
@@ -15,7 +14,6 @@ import { HealthController } from './health/health.controller';
     }),
     DatabaseModule,
     RoomsModule,
-    MediasoupModule,
   ],
   controllers: [HealthController],
   providers: [SignalingGateway],

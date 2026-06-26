@@ -7,50 +7,37 @@ import {
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { RoomsService } from '../rooms/rooms.service';
-import { MediasoupService } from '../mediasoup/mediasoup.service';
-import { v4 as uuidv4 } from 'uuid';
+
+interface ParticipantState {
+  socketId: string;
+  username: string;
+  userId: string;
+  participantId: string;
+}
 
 interface RoomState {
   roomId: string;
   participants: Map<string, ParticipantState>;
 }
 
-interface ParticipantState {
-  socketId: string;
-  username: string;
-  userId: string;
-  producerIds: string[];
-  consumerIds: string[];
-}
-
 @WebSocketGateway({
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
   transports: ['websocket', 'polling'],
 })
 @Injectable()
-export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit {
+export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
   private readonly logger = new Logger(SignalingGateway.name);
   private rooms: Map<string, RoomState> = new Map();
-  private participantSockets: Map<string, string> = new Map();
+  private socketToParticipant: Map<string, string> = new Map();
+  private participantToRoom: Map<string, string> = new Map();
 
-  constructor(
-    private roomsService: RoomsService,
-    private mediasoupService: MediasoupService
-  ) {}
-
-  async onModuleInit() {
-    await this.mediasoupService.initializeWorkers();
-    this.logger.log('Mediasoup initialized');
-  }
+  constructor(private roomsService: RoomsService) {}
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`);
@@ -58,24 +45,23 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Client disconnected: ${client.id}`);
-
-    for (const [roomId, room] of this.rooms.entries()) {
-      for (const [participantId, participant] of room.participants.entries()) {
-        if (participant.socketId === client.id) {
-          room.participants.delete(participantId);
-          this.server.to(roomId).emit('participant-left', { participantId });
-
-          // Persist leave time to DB
-          this.roomsService
-            .leaveRoom(roomId, participant.userId)
-            .catch((err) => this.logger.error(`Failed to update leaveRoom in DB: ${err}`));
-
-          if (room.participants.size === 0) {
-            this.rooms.delete(roomId);
-          }
+    const participantId = this.socketToParticipant.get(client.id);
+    if (!participantId) return;
+    const roomId = this.participantToRoom.get(participantId);
+    if (roomId) {
+      const room = this.rooms.get(roomId);
+      if (room) {
+        const p = room.participants.get(participantId);
+        if (p) {
+          this.roomsService.leaveRoom(roomId, p.userId).catch((e) => this.logger.error(e));
         }
+        room.participants.delete(participantId);
+        this.server.to(roomId).emit('participant-left', { participantId });
+        if (room.participants.size === 0) this.rooms.delete(roomId);
       }
+      this.participantToRoom.delete(participantId);
     }
+    this.socketToParticipant.delete(client.id);
   }
 
   @SubscribeMessage('join-room')
@@ -84,52 +70,31 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     @MessageBody() data: { roomId: string; username: string }
   ) {
     const { roomId, username } = data;
-
-    // Persist participant join to DB and get stable userId
     const dbParticipant = await this.roomsService.joinRoom(roomId, username);
     const participantId = dbParticipant.id;
 
     client.join(roomId);
-    this.participantSockets.set(participantId, client.id);
+    this.socketToParticipant.set(client.id, participantId);
+    this.participantToRoom.set(participantId, roomId);
 
     let room = this.rooms.get(roomId);
     if (!room) {
-      room = {
-        roomId,
-        participants: new Map(),
-      };
+      room = { roomId, participants: new Map() };
       this.rooms.set(roomId, room);
     }
-
     room.participants.set(participantId, {
       socketId: client.id,
       username,
       userId: dbParticipant.userId,
-      producerIds: [],
-      consumerIds: [],
-    });
-
-    // Only include participants OTHER than the one just joining
-    const otherParticipants = Array.from(room.participants.entries())
-      .filter(([id]) => id !== participantId)
-      .map(([id, participant]) => ({
-        id,
-        username: participant.username,
-        socketId: participant.socketId,
-        producerIds: participant.producerIds,
-      }));
-
-    client.emit('join-room-response', {
       participantId,
-      participants: otherParticipants,
     });
 
-    // Broadcast only to OTHER clients in the room (not the joining client)
-    client.broadcast.to(roomId).emit('participant-joined', {
-      id: participantId,
-      username,
-    });
+    const others = Array.from(room.participants.values())
+      .filter((p) => p.participantId !== participantId)
+      .map((p) => ({ id: p.participantId, username: p.username }));
 
+    client.emit('join-room-response', { participantId, participants: others });
+    client.broadcast.to(roomId).emit('participant-joined', { id: participantId, username });
     this.logger.log(`${username} joined room ${roomId}`);
   }
 
@@ -139,273 +104,112 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     @MessageBody() data: { roomId: string; participantId: string }
   ) {
     const { roomId, participantId } = data;
-
     const room = this.rooms.get(roomId);
     if (room) {
-      const participant = room.participants.get(participantId);
-      if (participant) {
-        // Persist leave time to DB
-        await this.roomsService
-          .leaveRoom(roomId, participant.userId)
-          .catch((err) => this.logger.error(`Failed to update leaveRoom in DB: ${err}`));
-      }
+      const p = room.participants.get(participantId);
+      if (p) await this.roomsService.leaveRoom(roomId, p.userId).catch((e) => this.logger.error(e));
       room.participants.delete(participantId);
       this.server.to(roomId).emit('participant-left', { participantId });
-
-      if (room.participants.size === 0) {
-        this.rooms.delete(roomId);
-      }
+      if (room.participants.size === 0) this.rooms.delete(roomId);
     }
-
     client.leave(roomId);
-    this.logger.log(`Participant ${participantId} left room ${roomId}`);
+    this.participantToRoom.delete(participantId);
+    this.socketToParticipant.delete(client.id);
   }
 
-  @SubscribeMessage('get-rtp-capabilities')
-  async handleGetRtpCapabilities(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string }
+  // ── WebRTC P2P Signaling ──────────────────────────────────────────────────
+
+  @SubscribeMessage('webrtc-offer')
+  handleOffer(
+    @ConnectedSocket() _client: Socket,
+    @MessageBody() data: { roomId: string; toParticipantId: string; fromParticipantId: string; sdp: any }
   ) {
-    try {
-      const rtpCapabilities = await this.mediasoupService.getRouterRtpCapabilities(data.roomId);
-      client.emit('rtp-capabilities', { rtpCapabilities });
-    } catch (err) {
-      this.logger.error(`Failed to get RTP capabilities: ${err}`);
-      client.emit('error', { message: 'Failed to get RTP capabilities' });
-    }
-  }
-
-  @SubscribeMessage('create-transport')
-  async handleCreateTransport(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      roomId: string;
-      participantId: string;
-      direction: 'send' | 'recv';
-    }
-  ) {
-    try {
-      const { roomId, participantId, direction } = data;
-
-      const transport = await this.mediasoupService.createWebRtcTransport(roomId);
-
-      const transportId = uuidv4();
-      this.mediasoupService.storeTransport(transportId, transport);
-
-      client.emit('transport-created', {
-        transportId,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters,
-        direction,
+    const target = this.rooms.get(data.roomId)?.participants.get(data.toParticipantId);
+    if (target) {
+      this.server.to(target.socketId).emit('webrtc-offer', {
+        fromParticipantId: data.fromParticipantId,
+        sdp: data.sdp,
       });
-    } catch (err) {
-      this.logger.error(`Failed to create transport: ${err}`);
-      client.emit('error', { message: 'Failed to create transport' });
     }
   }
 
-  @SubscribeMessage('connect-transport')
-  async handleConnectTransport(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      transportId: string;
-      dtlsParameters: any;
-    }
+  @SubscribeMessage('webrtc-answer')
+  handleAnswer(
+    @ConnectedSocket() _client: Socket,
+    @MessageBody() data: { roomId: string; toParticipantId: string; fromParticipantId: string; sdp: any }
   ) {
-    try {
-      const { transportId, dtlsParameters } = data;
-
-      const transport = this.mediasoupService.getTransport(transportId);
-      if (!transport) {
-        throw new Error('Transport not found');
-      }
-
-      await transport.connect({ dtlsParameters });
-      return {};
-    } catch (err) {
-      this.logger.error(`Failed to connect transport: ${err}`);
-      return { error: err.message };
-    }
-  }
-
-  @SubscribeMessage('produce')
-  async handleProduce(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      transportId: string;
-      kind: 'audio' | 'video';
-      rtpParameters: any;
-      roomId: string;
-      participantId: string;
-      appData?: Record<string, any>;
-    }
-  ) {
-    try {
-      const { transportId, kind, rtpParameters, roomId, participantId, appData } = data;
-
-      const transport = this.mediasoupService.getTransport(transportId);
-      if (!transport) {
-        throw new Error('Transport not found');
-      }
-
-      const producer = await this.mediasoupService.createProducer(transport, kind, rtpParameters);
-
-      const producerId = producer.id;
-      this.mediasoupService.storeProducer(producerId, producer);
-
-      const room = this.rooms.get(roomId);
-      if (room && room.participants.has(participantId)) {
-        room.participants.get(participantId).producerIds.push(producerId);
-      }
-
-      // Notify others (not the producer themselves)
-      client.broadcast.to(roomId).emit('new-producer', {
-        producerId,
-        participantId,
-        kind,
-        appData: appData || {},
+    const target = this.rooms.get(data.roomId)?.participants.get(data.toParticipantId);
+    if (target) {
+      this.server.to(target.socketId).emit('webrtc-answer', {
+        fromParticipantId: data.fromParticipantId,
+        sdp: data.sdp,
       });
-
-      return { producerId };
-    } catch (err) {
-      this.logger.error(`Failed to produce: ${err}`);
-      return { error: err.message };
     }
   }
 
-  @SubscribeMessage('consume')
-  async handleConsume(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      transportId: string;
-      producerId: string;
-      rtpCapabilities: any;
-      roomId: string;
-      participantId: string;
-    }
+  @SubscribeMessage('webrtc-ice-candidate')
+  handleIceCandidate(
+    @ConnectedSocket() _client: Socket,
+    @MessageBody() data: { roomId: string; toParticipantId: string; fromParticipantId: string; candidate: any }
   ) {
-    try {
-      const { transportId, producerId, rtpCapabilities, roomId, participantId } = data;
-
-      const transport = this.mediasoupService.getTransport(transportId);
-      const router = this.mediasoupService.getRouter(roomId);
-
-      if (!transport || !router) {
-        throw new Error('Transport or router not found');
-      }
-
-      const consumer = await this.mediasoupService.createConsumer(
-        transport,
-        router,
-        producerId,
-        rtpCapabilities
-      );
-
-      const consumerId = consumer.id;
-      this.mediasoupService.storeConsumer(consumerId, consumer);
-
-      const room = this.rooms.get(roomId);
-      if (room && room.participants.has(participantId)) {
-        room.participants.get(participantId).consumerIds.push(consumerId);
-      }
-
-      client.emit('consume-response', {
-        consumerId,
-        producerId,
-        kind: consumer.kind,
-        rtpParameters: consumer.rtpParameters,
-        paused: consumer.paused,
+    const target = this.rooms.get(data.roomId)?.participants.get(data.toParticipantId);
+    if (target) {
+      this.server.to(target.socketId).emit('webrtc-ice-candidate', {
+        fromParticipantId: data.fromParticipantId,
+        candidate: data.candidate,
       });
-
-      return {
-        consumerId,
-        producerId,
-        kind: consumer.kind,
-        rtpParameters: consumer.rtpParameters,
-        paused: consumer.paused,
-      };
-    } catch (err) {
-      this.logger.error(`Failed to consume: ${err}`);
-      return { error: err.message };
     }
   }
 
-  @SubscribeMessage('resume-consumer')
-  async handleResumeConsumer(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { consumerId: string }
-  ) {
-    try {
-      const { consumerId } = data;
-      const consumer = this.mediasoupService.getConsumer(consumerId);
-
-      if (consumer && consumer.paused) {
-        await consumer.resume();
-      }
-
-      client.emit('consumer-resumed', { consumerId });
-    } catch (err) {
-      this.logger.error(`Failed to resume consumer: ${err}`);
-    }
-  }
-
-  @SubscribeMessage('camera-toggle')
-  async handleCameraToggle(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; participantId: string; enabled: boolean }
-  ) {
-    const { roomId, participantId, enabled } = data;
-    this.server.to(roomId).emit('camera-toggled', {
-      participantId,
-      enabled,
-    });
-  }
-
-  @SubscribeMessage('mic-toggle')
-  async handleMicToggle(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; participantId: string; enabled: boolean }
-  ) {
-    const { roomId, participantId, enabled } = data;
-    this.server.to(roomId).emit('mic-toggled', {
-      participantId,
-      enabled,
-    });
-  }
+  // ── Chat & UI ────────────────────────────────────────────────────────────
 
   @SubscribeMessage('send-message')
-  async handleSendMessage(
+  handleSendMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; user: string; text: string }
   ) {
-    const { roomId, user, text } = data;
-    client.broadcast.to(roomId).emit('chat-message', {
-      user,
-      text,
+    client.broadcast.to(data.roomId).emit('chat-message', {
+      user: data.user,
+      text: data.text,
       timestamp: new Date(),
     });
   }
 
+  @SubscribeMessage('camera-toggle')
+  handleCameraToggle(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string; participantId: string; enabled: boolean }
+  ) {
+    client.broadcast.to(data.roomId).emit('camera-toggled', {
+      participantId: data.participantId,
+      enabled: data.enabled,
+    });
+  }
+
+  @SubscribeMessage('mic-toggle')
+  handleMicToggle(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string; participantId: string; enabled: boolean }
+  ) {
+    client.broadcast.to(data.roomId).emit('mic-toggled', {
+      participantId: data.participantId,
+      enabled: data.enabled,
+    });
+  }
+
   @SubscribeMessage('screen-share-start')
-  async handleScreenShareStart(
+  handleScreenShareStart(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; participantId: string }
   ) {
-    const { roomId, participantId } = data;
-    this.server.to(roomId).emit('screen-share-started', { participantId });
+    client.broadcast.to(data.roomId).emit('screen-share-started', { participantId: data.participantId });
   }
 
   @SubscribeMessage('screen-share-stop')
-  async handleScreenShareStop(
+  handleScreenShareStop(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; participantId: string }
   ) {
-    const { roomId, participantId } = data;
-    this.server.to(roomId).emit('screen-share-stopped', { participantId });
+    client.broadcast.to(data.roomId).emit('screen-share-stopped', { participantId: data.participantId });
   }
 }
