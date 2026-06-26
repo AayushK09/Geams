@@ -7,7 +7,7 @@ import {
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { RoomsService } from '../rooms/rooms.service';
 import { MediasoupService } from '../mediasoup/mediasoup.service';
@@ -33,7 +33,8 @@ interface ParticipantState {
   },
   transports: ['websocket', 'polling'],
 })
-export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect {
+@Injectable()
+export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit {
   @WebSocketServer()
   server: Server;
 
@@ -44,11 +45,9 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   constructor(
     private roomsService: RoomsService,
     private mediasoupService: MediasoupService
-  ) {
-    this.initializeMediasoup();
-  }
+  ) {}
 
-  private async initializeMediasoup() {
+  async onModuleInit() {
     await this.mediasoupService.initializeWorkers();
     this.logger.log('Mediasoup initialized');
   }
@@ -117,6 +116,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         id,
         username: participant.username,
         socketId: participant.socketId,
+        producerIds: participant.producerIds,
       }));
 
     client.emit('join-room-response', {
@@ -159,6 +159,20 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
 
     client.leave(roomId);
     this.logger.log(`Participant ${participantId} left room ${roomId}`);
+  }
+
+  @SubscribeMessage('get-rtp-capabilities')
+  async handleGetRtpCapabilities(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string }
+  ) {
+    try {
+      const rtpCapabilities = await this.mediasoupService.getRouterRtpCapabilities(data.roomId);
+      client.emit('rtp-capabilities', { rtpCapabilities });
+    } catch (err) {
+      this.logger.error(`Failed to get RTP capabilities: ${err}`);
+      client.emit('error', { message: 'Failed to get RTP capabilities' });
+    }
   }
 
   @SubscribeMessage('create-transport')
@@ -212,12 +226,11 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       }
 
       await transport.connect({ dtlsParameters });
-
-      client.emit('transport-connected', { transportId });
       this.logger.debug(`Transport ${transportId} connected`);
+      return {};
     } catch (err) {
       this.logger.error(`Failed to connect transport: ${err}`);
-      client.emit('error', { message: 'Failed to connect transport' });
+      return { error: err.message };
     }
   }
 
@@ -241,9 +254,9 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         throw new Error('Transport not found');
       }
 
-      const producer = await this.mediasoupService.createProducer(transport, rtpParameters);
+      const producer = await this.mediasoupService.createProducer(transport, kind, rtpParameters);
 
-      const producerId = uuidv4();
+      const producerId = producer.id;
       this.mediasoupService.storeProducer(producerId, producer);
 
       const room = this.rooms.get(roomId);
@@ -251,18 +264,18 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         room.participants.get(participantId).producerIds.push(producerId);
       }
 
-      client.emit('produce-response', { producerId });
-
-      this.server.to(roomId).emit('new-producer', {
+      // Notify others (not the producer themselves)
+      client.broadcast.to(roomId).emit('new-producer', {
         producerId,
         participantId,
         kind,
       });
 
       this.logger.debug(`Producer ${producerId} created for ${kind} in ${roomId}`);
+      return { producerId };
     } catch (err) {
       this.logger.error(`Failed to produce: ${err}`);
-      client.emit('error', { message: 'Failed to produce' });
+      return { error: err.message };
     }
   }
 
@@ -295,7 +308,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         rtpCapabilities
       );
 
-      const consumerId = uuidv4();
+      const consumerId = consumer.id;
       this.mediasoupService.storeConsumer(consumerId, consumer);
 
       const room = this.rooms.get(roomId);
@@ -312,9 +325,16 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       });
 
       this.logger.debug(`Consumer ${consumerId} created for producer ${producerId}`);
+      return {
+        consumerId,
+        producerId,
+        kind: consumer.kind,
+        rtpParameters: consumer.rtpParameters,
+        paused: consumer.paused,
+      };
     } catch (err) {
       this.logger.error(`Failed to consume: ${err}`);
-      client.emit('error', { message: 'Failed to consume' });
+      return { error: err.message };
     }
   }
 
@@ -367,7 +387,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     @MessageBody() data: { roomId: string; user: string; text: string }
   ) {
     const { roomId, user, text } = data;
-    this.server.to(roomId).emit('chat-message', {
+    client.broadcast.to(roomId).emit('chat-message', {
       user,
       text,
       timestamp: new Date(),

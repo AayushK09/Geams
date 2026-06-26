@@ -15,21 +15,42 @@ export class MediasoupService {
     const numWorkers = parseInt(process.env.MEDIASOUP_NUM_WORKERS || '1');
 
     for (let i = 0; i < numWorkers; i++) {
-      const worker = await mediasoup.createWorker({
-        logLevel: (process.env.MEDIASOUP_WORKER_LOG_LEVEL as any) || 'warn',
-        logTags: ['rtp', 'rtcp', 'rtx', 'bwe'],
-        rtcMinPort: 40000 + i * 100,
-        rtcMaxPort: 40000 + i * 100 + 100,
-      });
-
-      worker.on('died', () => {
-        this.logger.error(`mediasoup Worker died, exiting in 2 seconds... [pid:${worker.pid}]`);
-        setTimeout(() => process.exit(1), 2000);
-      });
-
-      this.workers.push(worker);
-      this.logger.log(`Created mediasoup worker [pid:${worker.pid}]`);
+      await this.createWorker(i);
     }
+  }
+
+  private async createWorker(index: number): Promise<Worker> {
+    const worker = await mediasoup.createWorker({
+      logLevel: (process.env.MEDIASOUP_WORKER_LOG_LEVEL as any) || 'warn',
+      logTags: ['rtp', 'rtcp', 'rtx', 'bwe'],
+      rtcMinPort: 40000 + index * 1000,
+      rtcMaxPort: 40000 + index * 1000 + 999,
+    });
+
+    worker.on('died', async () => {
+      this.logger.error(`mediasoup Worker died [pid:${worker.pid}], restarting...`);
+      // Remove dead worker
+      this.workers = this.workers.filter((w) => w !== worker);
+      // Clear any routers that used this worker
+      for (const [roomId, router] of this.routers.entries()) {
+        if ((router as any).appData?.workerPid === worker.pid) {
+          this.routers.delete(roomId);
+        }
+      }
+      // Recreate worker after a short delay
+      setTimeout(async () => {
+        try {
+          await this.createWorker(index);
+          this.logger.log(`Mediasoup worker restarted`);
+        } catch (err) {
+          this.logger.error(`Failed to restart worker: ${err}`);
+        }
+      }, 2000);
+    });
+
+    this.workers.push(worker);
+    this.logger.log(`Created mediasoup worker [pid:${worker.pid}]`);
+    return worker;
   }
 
   getWorker(): Worker {
@@ -40,8 +61,13 @@ export class MediasoupService {
   }
 
   async createRouter(roomId: string): Promise<Router> {
-    if (this.routers.has(roomId)) {
-      return this.routers.get(roomId);
+    // If cached router exists and is not closed, reuse it
+    const existing = this.routers.get(roomId);
+    if (existing && !existing.closed) {
+      return existing;
+    }
+    if (existing) {
+      this.routers.delete(roomId);
     }
 
     const worker = this.getWorker();
@@ -101,9 +127,9 @@ export class MediasoupService {
     return transport;
   }
 
-  async createProducer(transport: WebRtcTransport, rtpParameters: any): Promise<Producer> {
+  async createProducer(transport: WebRtcTransport, kind: 'audio' | 'video', rtpParameters: any): Promise<Producer> {
     const producer = await transport.produce({
-      kind: rtpParameters.kind,
+      kind,
       rtpParameters,
     });
 
@@ -144,6 +170,11 @@ export class MediasoupService {
 
   getRouter(roomId: string): Router {
     return this.routers.get(roomId);
+  }
+
+  async getRouterRtpCapabilities(roomId: string) {
+    const router = await this.createRouter(roomId);
+    return router.rtpCapabilities;
   }
 
   storeTransport(transportId: string, transport: WebRtcTransport): void {
