@@ -200,8 +200,6 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         dtlsParameters: transport.dtlsParameters,
         direction,
       });
-
-      this.logger.debug(`Created ${direction} transport for ${participantId} in ${roomId}`);
     } catch (err) {
       this.logger.error(`Failed to create transport: ${err}`);
       client.emit('error', { message: 'Failed to create transport' });
@@ -226,7 +224,6 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       }
 
       await transport.connect({ dtlsParameters });
-      this.logger.debug(`Transport ${transportId} connected`);
       return {};
     } catch (err) {
       this.logger.error(`Failed to connect transport: ${err}`);
@@ -273,7 +270,6 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         appData: appData || {},
       });
 
-      this.logger.debug(`Producer ${producerId} created for ${kind} in ${roomId}`);
       return { producerId };
     } catch (err) {
       this.logger.error(`Failed to produce: ${err}`);
@@ -326,7 +322,6 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         paused: consumer.paused,
       });
 
-      this.logger.debug(`Consumer ${consumerId} created for producer ${producerId}`);
       return {
         consumerId,
         producerId,
